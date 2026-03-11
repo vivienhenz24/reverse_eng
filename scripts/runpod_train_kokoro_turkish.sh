@@ -65,7 +65,11 @@ python -m pip install --upgrade pip wheel setuptools
 
 if [[ "$DEVICE" == "cuda" ]]; then
   echo "==> installing CUDA PyTorch"
-  python -m pip install --upgrade torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cu121
+  python -m pip install --upgrade \
+    torch==2.9.1 \
+    torchvision==0.24.1 \
+    torchaudio==2.9.1 \
+    --index-url https://download.pytorch.org/whl/cu128
 else
   echo "==> installing CPU PyTorch"
   python -m pip install --upgrade torch torchaudio torchvision
