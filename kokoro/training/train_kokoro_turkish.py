@@ -4,6 +4,7 @@ import argparse
 from dataclasses import dataclass
 import itertools
 from pathlib import Path
+import re
 import sys
 
 import soundfile as sf
@@ -120,11 +121,25 @@ class KokoroTurkishTrainer(nn.Module):
         }
 
 
-def make_dataloader(manifest_path: Path, alignment_dir: Path, batch_size: int, max_samples: int | None):
+def make_dataloader(
+    manifest_path: Path,
+    alignment_dir: Path,
+    batch_size: int,
+    max_samples: int | None,
+    num_workers: int,
+    pin_memory: bool,
+):
     dataset = TurkishKokoroDataset(manifest_path=manifest_path, canonical_alignment_dir=alignment_dir)
-    if max_samples is not None:
+    if max_samples is not None and max_samples > 0:
         dataset = Subset(dataset, range(min(max_samples, len(dataset))))
-    return DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_turkish_batch)
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=collate_turkish_batch,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )
 
 
 def format_loss(name: str, value: torch.Tensor) -> str:
@@ -158,6 +173,30 @@ def save_training_checkpoint(
     torch.save(trainer.voicepacks.table.detach().cpu(), save_dir / f"voicepacks_step_{step:04d}.pt")
 
 
+def load_training_checkpoint(
+    checkpoint_path: Path,
+    trainer: KokoroTurkishTrainer,
+    optimizer: torch.optim.Optimizer,
+):
+    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    trainer.model.load_state_dict(ckpt["model_state_dict"], strict=False)
+    trainer.voicepacks.table.data.copy_(ckpt["voicepack_table"].to(trainer.voicepacks.table.device))
+    optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+    return int(ckpt["step"]) + 1
+
+
+def find_latest_checkpoint(save_dir: Path) -> Path | None:
+    if not save_dir.exists():
+        return None
+    checkpoints = sorted(save_dir.glob("checkpoint_step_*.pt"))
+    if not checkpoints:
+        return None
+    return max(
+        checkpoints,
+        key=lambda p: int(re.search(r"checkpoint_step_(\d+)\.pt$", p.name).group(1)),
+    )
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, default=DEFAULT_TURKISH_MANIFEST)
@@ -171,6 +210,9 @@ def main():
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--save-dir", type=Path, default=None)
     parser.add_argument("--save-every", type=int, default=0)
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--pin-memory", action="store_true")
     parser.add_argument(
         "--train-config",
         type=str,
@@ -186,7 +228,14 @@ def main():
     args = parser.parse_args()
 
     device = torch.device(args.device)
-    dataloader = make_dataloader(args.manifest, args.alignment_dir, args.batch_size, args.max_samples)
+    dataloader = make_dataloader(
+        args.manifest,
+        args.alignment_dir,
+        args.batch_size,
+        args.max_samples,
+        args.num_workers,
+        args.pin_memory,
+    )
     trainer = KokoroTurkishTrainer(num_voices=2).to(device)
     init_voicepacks(trainer, args.voicepack_init)
     trainer.set_trainable_configuration(args.train_config)
@@ -203,16 +252,28 @@ def main():
     print(f"alignment dir:        {args.alignment_dir}")
     print(f"device:               {device}")
     print(f"batch size:           {args.batch_size}")
+    print(f"max samples:          {args.max_samples}")
     print(f"max steps:            {args.max_steps}")
     print(f"lr:                   {args.lr}")
     print(f"grad clip:            {args.grad_clip}")
+    print(f"num workers:          {args.num_workers}")
+    print(f"pin memory:           {args.pin_memory}")
     print(f"disable F0 loss:      {args.disable_f0_loss}")
     print(f"save dir:             {args.save_dir}")
     print(f"train config:         {args.train_config}")
     print(f"voicepack init:       {args.voicepack_init}")
 
     step = 0
+    if args.resume and args.save_dir is not None:
+        latest = find_latest_checkpoint(args.save_dir)
+        if latest is not None:
+            step = load_training_checkpoint(latest, trainer, optimizer)
+            print(f"resumed from:         {latest}")
+            print(f"resume step:          {step}")
+
     for batch in itertools.cycle(dataloader):
+        if step >= args.max_steps:
+            break
         batch = TurkishBatchToDevice(batch, device)
         out = trainer.forward_teacher_forced(
             input_ids=batch.input_ids,
@@ -269,8 +330,6 @@ def main():
             f"{format_loss('vp', bundle.voicepack_smooth)}"
         )
         step += 1
-        if step >= args.max_steps:
-            break
 
     if args.save_dir is not None and step > 0:
         args.save_dir.mkdir(parents=True, exist_ok=True)

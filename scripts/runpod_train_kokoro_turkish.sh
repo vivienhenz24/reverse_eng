@@ -4,8 +4,14 @@ set -euo pipefail
 # Run from repo root after cloning reverse_eng onto a CUDA RunPod machine.
 #
 # Example:
-#   HF_TOKEN=hf_xxx SPEAKER=female_speaker MAX_ROWS=12000 BATCH_SIZE=4 \
+#   HF_TOKEN=hf_xxx SPEAKER=female_speaker MAX_ROWS=0 BATCH_SIZE=2 \
 #   bash scripts/runpod_train_kokoro_turkish.sh
+#
+# Notes:
+# - Kokoro voicepacks support lengths up to 510, but training on full-length
+#   utterances near that limit is usually a VRAM problem. Keep MAX_PHONEMES
+#   below 510 unless you add segment cropping/bucketing.
+# - MAX_ROWS=0 means "use the full speaker subset".
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -14,13 +20,15 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 VENV_DIR="${VENV_DIR:-.venv-runpod}"
 DEVICE="${DEVICE:-cuda}"
 SPEAKER="${SPEAKER:-female_speaker}"
-MAX_PHONEMES="${MAX_PHONEMES:-80}"
-MAX_ROWS="${MAX_ROWS:-12000}"
-MAX_STEPS="${MAX_STEPS:-2000}"
-BATCH_SIZE="${BATCH_SIZE:-4}"
+MAX_PHONEMES="${MAX_PHONEMES:-140}"
+MAX_ROWS="${MAX_ROWS:-0}"
+MAX_STEPS="${MAX_STEPS:-12000}"
+BATCH_SIZE="${BATCH_SIZE:-2}"
 LR="${LR:-2e-5}"
 GRAD_CLIP="${GRAD_CLIP:-0.5}"
 SAVE_EVERY="${SAVE_EVERY:-50}"
+NUM_WORKERS="${NUM_WORKERS:-4}"
+PIN_MEMORY="${PIN_MEMORY:-1}"
 RUN_NAME="${RUN_NAME:-${SPEAKER}_p${MAX_PHONEMES}_rows${MAX_ROWS}}"
 RUN_DIR="${RUN_DIR:-kokoro/training/runpod_runs/${RUN_NAME}}"
 HF_DATASET_REPO="${HF_DATASET_REPO:-vsqrd/styletts2-turkish}"
@@ -33,11 +41,15 @@ export HUGGINGFACE_HUB_CACHE="$HF_HUB_CACHE"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME/transformers}"
 export HF_HUB_ENABLE_HF_TRANSFER="${HF_HUB_ENABLE_HF_TRANSFER:-1}"
 export HF_HUB_DISABLE_TELEMETRY=1
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 echo "==> repo root: $ROOT_DIR"
 echo "==> run dir:   $RUN_DIR"
 echo "==> speaker:   $SPEAKER"
 echo "==> device:    $DEVICE"
+echo "==> max phon:  $MAX_PHONEMES"
+echo "==> max rows:  $MAX_ROWS"
+echo "==> max steps: $MAX_STEPS"
 
 if [[ -z "${HF_TOKEN:-}" ]]; then
   read -r -s -p "Enter Hugging Face token: " HF_TOKEN
@@ -140,13 +152,32 @@ else
 fi
 
 echo "==> building single-speaker subset manifest"
-python kokoro/training/build_turkish_subset_manifest.py \
-  --speaker "$SPEAKER" \
-  --max-phonemes "$MAX_PHONEMES" \
-  --max-rows "$MAX_ROWS" \
-  --out "$RUN_DIR/${RUN_NAME}.csv"
+if [[ "$MAX_ROWS" != "0" ]]; then
+  python kokoro/training/build_turkish_subset_manifest.py \
+    --speaker "$SPEAKER" \
+    --max-phonemes "$MAX_PHONEMES" \
+    --max-rows "$MAX_ROWS" \
+    --out "$RUN_DIR/${RUN_NAME}.csv"
+fi
+
+if [[ "$MAX_ROWS" == "0" ]]; then
+  python kokoro/training/build_turkish_subset_manifest.py \
+    --speaker "$SPEAKER" \
+    --max-phonemes "$MAX_PHONEMES" \
+    --out "$RUN_DIR/${RUN_NAME}.csv"
+fi
 
 echo "==> launching training"
+PIN_ARGS=()
+if [[ "$PIN_MEMORY" == "1" ]]; then
+  PIN_ARGS+=(--pin-memory)
+fi
+
+RESUME_ARGS=()
+if [[ -d "$RUN_DIR/checkpoints" && -n "$(find "$RUN_DIR/checkpoints" -maxdepth 1 -name 'checkpoint_step_*.pt' -print -quit 2>/dev/null)" ]]; then
+  RESUME_ARGS+=(--resume)
+fi
+
 python kokoro/training/train_kokoro_turkish.py \
   --manifest "$RUN_DIR/${RUN_NAME}.csv" \
   --alignment-dir alignments_kokoro_tr \
@@ -154,10 +185,13 @@ python kokoro/training/train_kokoro_turkish.py \
   --batch-size "$BATCH_SIZE" \
   --max-steps "$MAX_STEPS" \
   --max-samples "$MAX_ROWS" \
+  --num-workers "$NUM_WORKERS" \
   --lr "$LR" \
   --grad-clip "$GRAD_CLIP" \
   --train-config voicepack_predictor_text \
   --voicepack-init mean \
   --save-dir "$RUN_DIR/checkpoints" \
   --save-every "$SAVE_EVERY" \
+  "${PIN_ARGS[@]}" \
+  "${RESUME_ARGS[@]}" \
   2>&1 | tee "$RUN_DIR/train.log"
