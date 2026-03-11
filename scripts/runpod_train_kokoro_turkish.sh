@@ -38,6 +38,15 @@ echo "==> run dir:   $RUN_DIR"
 echo "==> speaker:   $SPEAKER"
 echo "==> device:    $DEVICE"
 
+if [[ -z "${HF_TOKEN:-}" ]]; then
+  read -r -s -p "Enter Hugging Face token: " HF_TOKEN
+  echo
+  if [[ -z "$HF_TOKEN" ]]; then
+    echo "HF token is required to download dataset artifacts." >&2
+    exit 1
+  fi
+fi
+
 if command -v apt-get >/dev/null 2>&1; then
   echo "==> installing system packages"
   sudo apt-get update
