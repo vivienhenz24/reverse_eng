@@ -43,12 +43,6 @@ class KokoroTurkishTrainer(nn.Module):
         self.model = KModel(config=str(CONFIG_PATH), model=str(CHECKPOINT_PATH))
         self.voicepacks = TrainableVoicepackTable(num_voices=num_voices)
 
-    def freeze_stage1(self):
-        for p in self.model.decoder.parameters():
-            p.requires_grad = False
-        for p in self.model.bert.parameters():
-            p.requires_grad = False
-
     def freeze_all(self):
         for p in self.model.parameters():
             p.requires_grad = False
@@ -58,8 +52,6 @@ class KokoroTurkishTrainer(nn.Module):
     def set_trainable_configuration(self, config_name: str):
         self.freeze_all()
 
-        # The released decoder and PL-BERT stay frozen in all current Turkish
-        # adaptation probes. We only vary the text/prosody stack plus voicepacks.
         for p in self.voicepacks.parameters():
             p.requires_grad = True
 
@@ -83,7 +75,37 @@ class KokoroTurkishTrainer(nn.Module):
             for p in self.model.bert_encoder.parameters():
                 p.requires_grad = True
             return
+        if config_name == "voicepack_predictor_text_decoder":
+            for p in self.model.predictor.parameters():
+                p.requires_grad = True
+            for p in self.model.text_encoder.parameters():
+                p.requires_grad = True
+            for p in self.model.decoder.parameters():
+                p.requires_grad = True
+            return
+        if config_name == "voicepack_predictor_text_bertenc_decoder":
+            for p in self.model.predictor.parameters():
+                p.requires_grad = True
+            for p in self.model.text_encoder.parameters():
+                p.requires_grad = True
+            for p in self.model.bert_encoder.parameters():
+                p.requires_grad = True
+            for p in self.model.decoder.parameters():
+                p.requires_grad = True
+            return
         raise ValueError(f"Unknown training config: {config_name}")
+
+    @staticmethod
+    def _match_condition_length(cond: torch.Tensor, target_len: int) -> torch.Tensor:
+        cur_len = cond.shape[-1]
+        if cur_len == target_len:
+            return cond
+        if cur_len > target_len:
+            return cond[..., :target_len].contiguous()
+        if cur_len == 0:
+            return torch.zeros((*cond.shape[:-1], target_len), device=cond.device, dtype=cond.dtype)
+        pad = cond[..., -1:].expand(*cond.shape[:-1], target_len - cur_len)
+        return torch.cat([cond, pad], dim=-1).contiguous()
 
     def forward_teacher_forced(
         self,
@@ -92,6 +114,8 @@ class KokoroTurkishTrainer(nn.Module):
         alignments: torch.FloatTensor,
         speaker_ids: torch.LongTensor,
         phoneme_lengths: torch.LongTensor,
+        decoder_f0: torch.Tensor | None = None,
+        decoder_n: torch.Tensor | None = None,
     ):
         ref_s = self.voicepacks(speaker_ids, phoneme_lengths)
         text_mask = torch.arange(input_lengths.max(), device=input_ids.device).unsqueeze(0)
@@ -110,7 +134,10 @@ class KokoroTurkishTrainer(nn.Module):
 
         t_en = self.model.text_encoder(input_ids, input_lengths, text_mask)
         asr = t_en @ alignments
-        pred_audio = self.model.decoder(asr, f0_pred, n_pred, ref_s[:, :128]).squeeze(1)
+
+        f0_for_decoder = f0_pred if decoder_f0 is None else self._match_condition_length(decoder_f0, f0_pred.shape[-1])
+        n_for_decoder = n_pred if decoder_n is None else self._match_condition_length(decoder_n, n_pred.shape[-1])
+        pred_audio = self.model.decoder(asr, f0_for_decoder, n_for_decoder, ref_s[:, :128]).squeeze(1)
 
         return {
             "audio": pred_audio,
@@ -197,36 +224,82 @@ def find_latest_checkpoint(save_dir: Path) -> Path | None:
     )
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--manifest", type=Path, default=DEFAULT_TURKISH_MANIFEST)
-    parser.add_argument("--alignment-dir", type=Path, default=DEFAULT_CANONICAL_ALIGNMENTS)
-    parser.add_argument("--batch-size", type=int, default=2)
-    parser.add_argument("--max-steps", type=int, default=1)
-    parser.add_argument("--max-samples", type=int, default=8)
-    parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--grad-clip", type=float, default=1.0)
-    parser.add_argument("--disable-f0-loss", action="store_true")
-    parser.add_argument("--device", type=str, default="cpu")
-    parser.add_argument("--save-dir", type=Path, default=None)
-    parser.add_argument("--save-every", type=int, default=0)
-    parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--num-workers", type=int, default=2)
-    parser.add_argument("--pin-memory", action="store_true")
+@dataclass
+class TurkishBatchToDevice:
+    waveforms: torch.FloatTensor
+    waveform_lengths: torch.LongTensor
+    mel: torch.FloatTensor
+    mel_lengths: torch.LongTensor
+    input_ids: torch.LongTensor
+    input_lengths: torch.LongTensor
+    alignments: torch.FloatTensor
+    speaker_ids: torch.LongTensor
+    phoneme_lengths: torch.LongTensor
+    texts: list[str]
+    files: list[str]
+
+    def __init__(self, batch, device: torch.device):
+        self.waveforms = batch.waveforms.to(device)
+        self.waveform_lengths = batch.waveform_lengths.to(device)
+        self.mel = batch.mel.to(device)
+        self.mel_lengths = batch.mel_lengths.to(device)
+        self.input_ids = batch.input_ids.to(device)
+        self.input_lengths = batch.input_lengths.to(device)
+        self.alignments = batch.alignments.to(device)
+        self.speaker_ids = batch.speaker_ids.to(device)
+        self.phoneme_lengths = batch.phoneme_lengths.to(device)
+        self.texts = batch.texts
+        self.files = batch.files
+
+
+def build_arg_parser(defaults: dict[str, object] | None = None, description: str | None = None) -> argparse.ArgumentParser:
+    defaults = defaults or {}
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument("--manifest", type=Path, default=defaults.get("manifest", DEFAULT_TURKISH_MANIFEST))
+    parser.add_argument("--alignment-dir", type=Path, default=defaults.get("alignment_dir", DEFAULT_CANONICAL_ALIGNMENTS))
+    parser.add_argument("--batch-size", type=int, default=defaults.get("batch_size", 2))
+    parser.add_argument("--max-steps", type=int, default=defaults.get("max_steps", 1))
+    parser.add_argument("--max-samples", type=int, default=defaults.get("max_samples", 8))
+    parser.add_argument("--lr", type=float, default=defaults.get("lr", 1e-4))
+    parser.add_argument("--grad-clip", type=float, default=defaults.get("grad_clip", 1.0))
+    parser.add_argument("--disable-f0-loss", action="store_true", default=defaults.get("disable_f0_loss", False))
+    parser.add_argument("--device", type=str, default=defaults.get("device", "cpu"))
+    parser.add_argument("--save-dir", type=Path, default=defaults.get("save_dir"))
+    parser.add_argument("--save-every", type=int, default=defaults.get("save_every", 0))
+    parser.add_argument("--resume", action="store_true", default=defaults.get("resume", False))
+    parser.add_argument("--num-workers", type=int, default=defaults.get("num_workers", 2))
+    parser.add_argument("--pin-memory", action="store_true", default=defaults.get("pin_memory", False))
     parser.add_argument(
         "--train-config",
         type=str,
-        default="voicepack_predictor_text",
+        default=defaults.get("train_config", "voicepack_predictor_text"),
         choices=[
             "voicepack_only",
             "voicepack_predictor",
             "voicepack_predictor_text",
             "voicepack_predictor_text_bertenc",
+            "voicepack_predictor_text_decoder",
+            "voicepack_predictor_text_bertenc_decoder",
         ],
     )
-    parser.add_argument("--voicepack-init", type=str, default="mean")
-    args = parser.parse_args()
+    parser.add_argument("--voicepack-init", type=str, default=defaults.get("voicepack_init", "mean"))
+    parser.add_argument("--speaker-label", type=str, default=defaults.get("speaker_label", "female_speaker"))
+    parser.add_argument(
+        "--decoder-f0-source",
+        type=str,
+        default=defaults.get("decoder_f0_source", "pred"),
+        choices=["pred", "gt"],
+    )
+    parser.add_argument(
+        "--decoder-n-source",
+        type=str,
+        default=defaults.get("decoder_n_source", "pred"),
+        choices=["pred", "gt"],
+    )
+    return parser
 
+
+def run_training(args: argparse.Namespace):
     device = torch.device(args.device)
     dataloader = make_dataloader(
         args.manifest,
@@ -237,11 +310,14 @@ def main():
         args.pin_memory,
     )
     trainer = KokoroTurkishTrainer(num_voices=2).to(device)
-    init_voicepacks(trainer, args.voicepack_init)
+    init_voicepacks(trainer, args.voicepack_init, speaker_label=args.speaker_label)
     trainer.set_trainable_configuration(args.train_config)
     trainer.train()
 
     losses = TurkishKokoroLosses(device=device, disable_f0_loss=args.disable_f0_loss)
+    if (args.decoder_f0_source == "gt" or args.decoder_n_source == "gt") and losses.pitch_extractor is None:
+        raise ValueError("GT decoder conditioning requires F0 loss to remain enabled")
+
     params = [p for p in trainer.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(params, lr=args.lr, foreach=False)
 
@@ -262,6 +338,9 @@ def main():
     print(f"save dir:             {args.save_dir}")
     print(f"train config:         {args.train_config}")
     print(f"voicepack init:       {args.voicepack_init}")
+    print(f"speaker label:        {args.speaker_label}")
+    print(f"decoder F0 source:    {args.decoder_f0_source}")
+    print(f"decoder N source:     {args.decoder_n_source}")
 
     step = 0
     if args.resume and args.save_dir is not None:
@@ -275,12 +354,20 @@ def main():
         if step >= args.max_steps:
             break
         batch = TurkishBatchToDevice(batch, device)
+
+        gt_f0 = None
+        gt_n = None
+        if args.decoder_f0_source == "gt" or args.decoder_n_source == "gt":
+            gt_f0, gt_n = losses.extract_ground_truth_conditioning(batch.mel)
+
         out = trainer.forward_teacher_forced(
             input_ids=batch.input_ids,
             input_lengths=batch.input_lengths,
             alignments=batch.alignments,
             speaker_ids=batch.speaker_ids,
             phoneme_lengths=batch.phoneme_lengths,
+            decoder_f0=gt_f0 if args.decoder_f0_source == "gt" else None,
+            decoder_n=gt_n if args.decoder_n_source == "gt" else None,
         )
         bundle = losses.compute(
             pred_audio=out["audio"],
@@ -337,32 +424,10 @@ def main():
         torch.save(trainer.voicepacks.table.detach().cpu(), args.save_dir / "final_voicepacks.pt")
 
 
-@dataclass
-class TurkishBatchToDevice:
-    waveforms: torch.FloatTensor
-    waveform_lengths: torch.LongTensor
-    mel: torch.FloatTensor
-    mel_lengths: torch.LongTensor
-    input_ids: torch.LongTensor
-    input_lengths: torch.LongTensor
-    alignments: torch.FloatTensor
-    speaker_ids: torch.LongTensor
-    phoneme_lengths: torch.LongTensor
-    texts: list[str]
-    files: list[str]
-
-    def __init__(self, batch, device: torch.device):
-        self.waveforms = batch.waveforms.to(device)
-        self.waveform_lengths = batch.waveform_lengths.to(device)
-        self.mel = batch.mel.to(device)
-        self.mel_lengths = batch.mel_lengths.to(device)
-        self.input_ids = batch.input_ids.to(device)
-        self.input_lengths = batch.input_lengths.to(device)
-        self.alignments = batch.alignments.to(device)
-        self.speaker_ids = batch.speaker_ids.to(device)
-        self.phoneme_lengths = batch.phoneme_lengths.to(device)
-        self.texts = batch.texts
-        self.files = batch.files
+def main(argv: list[str] | None = None, defaults: dict[str, object] | None = None, description: str | None = None):
+    parser = build_arg_parser(defaults=defaults, description=description)
+    args = parser.parse_args(argv)
+    run_training(args)
 
 
 if __name__ == "__main__":

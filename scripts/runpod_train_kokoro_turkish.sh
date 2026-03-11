@@ -16,21 +16,77 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-PYTHON_BIN="${PYTHON_BIN:-python3}"
-VENV_DIR="${VENV_DIR:-.venv-runpod}"
-DEVICE="${DEVICE:-cuda}"
-SPEAKER="${SPEAKER:-female_speaker}"
-MAX_PHONEMES="${MAX_PHONEMES:-140}"
-MAX_ROWS="${MAX_ROWS:-0}"
-MAX_STEPS="${MAX_STEPS:-12000}"
-BATCH_SIZE="${BATCH_SIZE:-2}"
-LR="${LR:-2e-5}"
-GRAD_CLIP="${GRAD_CLIP:-0.5}"
-SAVE_EVERY="${SAVE_EVERY:-50}"
-NUM_WORKERS="${NUM_WORKERS:-0}"
-PIN_MEMORY="${PIN_MEMORY:-0}"
-RUN_NAME="${RUN_NAME:-${SPEAKER}_p${MAX_PHONEMES}_rows${MAX_ROWS}}"
-RUN_DIR="${RUN_DIR:-kokoro/training/runpod_runs/${RUN_NAME}}"
+set_default() {
+  local var_name="$1"
+  local default_value="$2"
+  if [[ -z "${!var_name+x}" ]]; then
+    printf -v "$var_name" "%s" "$default_value"
+  fi
+}
+
+set_default PYTHON_BIN python3
+set_default VENV_DIR .venv-runpod
+set_default DEVICE cuda
+set_default SPEAKER female_speaker
+set_default APPROACH direct
+set_default MAX_ROWS 0
+set_default NUM_WORKERS 0
+set_default PIN_MEMORY 0
+
+case "$APPROACH" in
+  direct)
+    set_default TRAIN_SCRIPT kokoro/training/train_turkish_approach_direct.py
+    set_default MAX_PHONEMES 140
+    set_default MAX_STEPS 12000
+    set_default BATCH_SIZE 2
+    set_default LR 2e-5
+    set_default GRAD_CLIP 0.5
+    set_default SAVE_EVERY 50
+    ;;
+  direct_bert)
+    set_default TRAIN_SCRIPT kokoro/training/train_turkish_approach_direct_bert.py
+    set_default MAX_PHONEMES 140
+    set_default MAX_STEPS 12000
+    set_default BATCH_SIZE 2
+    set_default LR 1e-5
+    set_default GRAD_CLIP 0.5
+    set_default SAVE_EVERY 50
+    ;;
+  unfreeze_decoder)
+    set_default TRAIN_SCRIPT kokoro/training/train_turkish_approach_unfreeze_decoder.py
+    set_default MAX_PHONEMES 100
+    set_default MAX_STEPS 8000
+    set_default BATCH_SIZE 1
+    set_default LR 1e-5
+    set_default GRAD_CLIP 0.3
+    set_default SAVE_EVERY 25
+    ;;
+  gt_bootstrap)
+    set_default TRAIN_SCRIPT kokoro/training/train_turkish_approach_gt_bootstrap.py
+    set_default MAX_PHONEMES 140
+    set_default MAX_STEPS 12000
+    set_default BATCH_SIZE 2
+    set_default LR 2e-5
+    set_default GRAD_CLIP 0.5
+    set_default SAVE_EVERY 50
+    ;;
+  voicepack_bootstrap)
+    set_default TRAIN_SCRIPT kokoro/training/train_turkish_approach_voicepack_bootstrap.py
+    set_default MAX_PHONEMES 140
+    set_default MAX_STEPS 12000
+    set_default BATCH_SIZE 2
+    set_default LR 2e-5
+    set_default GRAD_CLIP 0.5
+    set_default SAVE_EVERY 50
+    ;;
+  *)
+    echo "Unknown APPROACH=$APPROACH" >&2
+    exit 1
+    ;;
+esac
+
+set_default RUN_NAME "${APPROACH}_${SPEAKER}_p${MAX_PHONEMES}_rows${MAX_ROWS}"
+set_default RUN_DIR "kokoro/training/runpod_runs/${RUN_NAME}"
 HF_DATASET_REPO="${HF_DATASET_REPO:-vsqrd/styletts2-turkish}"
 HF_MODEL_REPO="${HF_MODEL_REPO:-hexgrad/Kokoro-82M}"
 
@@ -45,6 +101,7 @@ export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 
 echo "==> repo root: $ROOT_DIR"
 echo "==> run dir:   $RUN_DIR"
+echo "==> approach:  $APPROACH"
 echo "==> speaker:   $SPEAKER"
 echo "==> device:    $DEVICE"
 echo "==> max phon:  $MAX_PHONEMES"
@@ -178,7 +235,7 @@ if [[ -d "$RUN_DIR/checkpoints" && -n "$(find "$RUN_DIR/checkpoints" -maxdepth 1
   RESUME_ARGS+=(--resume)
 fi
 
-python kokoro/training/train_kokoro_turkish.py \
+python "$TRAIN_SCRIPT" \
   --manifest "$RUN_DIR/${RUN_NAME}.csv" \
   --alignment-dir alignments_kokoro_tr \
   --device "$DEVICE" \
@@ -188,8 +245,7 @@ python kokoro/training/train_kokoro_turkish.py \
   --num-workers "$NUM_WORKERS" \
   --lr "$LR" \
   --grad-clip "$GRAD_CLIP" \
-  --train-config voicepack_predictor_text \
-  --voicepack-init mean \
+  --speaker-label "$SPEAKER" \
   --save-dir "$RUN_DIR/checkpoints" \
   --save-every "$SAVE_EVERY" \
   "${PIN_ARGS[@]}" \

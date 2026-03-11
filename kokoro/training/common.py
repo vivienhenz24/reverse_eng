@@ -82,11 +82,20 @@ def named_pack(name: str) -> torch.Tensor:
     return torch.load(VOICES_DIR / f"{name}.pt", map_location="cpu", weights_only=True).squeeze(1).float()
 
 
-def init_voicepacks(trainer, mode: str):
+def init_voicepacks(trainer, mode: str, speaker_label: str | None = None):
     with torch.no_grad():
         if mode == "random":
             return
-        if mode == "mean":
+        if mode == "auto_gender":
+            if speaker_label is None:
+                raise ValueError("speaker_label is required for auto_gender voicepack init")
+            if "female" in speaker_label:
+                base = named_pack("af_heart")
+            elif "male" in speaker_label:
+                base = named_pack("pm_alex")
+            else:
+                raise ValueError(f"Could not infer gendered bootstrap voice for {speaker_label!r}")
+        elif mode == "mean":
             base = mean_released_pack()
         elif mode.startswith("voice:"):
             base = named_pack(mode.split(":", 1)[1])

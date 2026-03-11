@@ -60,6 +60,14 @@ class TurkishKokoroLosses:
         # ignore BOS/EOS durations in the loss by zeroing them here; caller will slice
         return gt_dur
 
+    def extract_ground_truth_conditioning(self, target_mel: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.pitch_extractor is None:
+            raise RuntimeError("Ground-truth acoustic conditioning requires pitch extraction to be enabled")
+        with torch.no_grad():
+            f0_real, _, _ = self.pitch_extractor(target_mel.unsqueeze(1))
+            n_real = log_norm(target_mel.unsqueeze(1)).squeeze(1)
+        return self.ensure_bt(f0_real), self.ensure_bt(n_real)
+
     @staticmethod
     def crop_time_pair(a: torch.Tensor, b: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         target_len = min(a.shape[-1], b.shape[-1])
