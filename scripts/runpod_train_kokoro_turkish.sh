@@ -96,7 +96,7 @@ HF_ARGS=(download "$HF_DATASET_REPO" --repo-type dataset --local-dir "$DOWNLOAD_
 if [[ -n "${HF_TOKEN:-}" ]]; then
   HF_ARGS+=(--token "$HF_TOKEN")
 fi
-python -m huggingface_hub "${HF_ARGS[@]}" combined_dataset.tar.gz alignments.tar.gz
+hf "${HF_ARGS[@]}" combined_dataset.tar.gz alignments.tar.gz
 
 echo "==> extracting dataset"
 tar -xzf "$DOWNLOAD_DIR/combined_dataset.tar.gz" -C "$ROOT_DIR"
