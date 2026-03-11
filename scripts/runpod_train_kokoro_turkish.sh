@@ -24,6 +24,7 @@ SAVE_EVERY="${SAVE_EVERY:-50}"
 RUN_NAME="${RUN_NAME:-${SPEAKER}_p${MAX_PHONEMES}_rows${MAX_ROWS}}"
 RUN_DIR="${RUN_DIR:-kokoro/training/runpod_runs/${RUN_NAME}}"
 HF_DATASET_REPO="${HF_DATASET_REPO:-vsqrd/styletts2-turkish}"
+HF_MODEL_REPO="${HF_MODEL_REPO:-hexgrad/Kokoro-82M}"
 
 export PYTHONUNBUFFERED=1
 export HF_HOME="${HF_HOME:-$ROOT_DIR/.hf_home}"
@@ -109,6 +110,19 @@ else
   echo "==> extracting dataset"
   tar -xzf "$DOWNLOAD_DIR/combined_dataset.tar.gz" -C "$ROOT_DIR"
   tar -xzf "$DOWNLOAD_DIR/alignments.tar.gz" -C "$ROOT_DIR"
+fi
+
+if [[ -f "$ROOT_DIR/kokoro/weights/kokoro-v1_0.pth" && -n "$(find "$ROOT_DIR/kokoro/weights/voices" -maxdepth 1 -name '*.pt' -print -quit 2>/dev/null)" ]]; then
+  echo "==> Kokoro weights already present, skipping"
+else
+  echo "==> downloading Kokoro weights and voices"
+  MODEL_ARGS=(download "$HF_MODEL_REPO" --local-dir "$ROOT_DIR/kokoro/weights")
+  if [[ -n "${HF_TOKEN:-}" ]]; then
+    MODEL_ARGS+=(--token "$HF_TOKEN")
+  fi
+  hf "${MODEL_ARGS[@]}" kokoro-v1_0.pth
+  mkdir -p "$ROOT_DIR/kokoro/weights/voices"
+  hf "${MODEL_ARGS[@]}" --include "voices/*.pt"
 fi
 
 echo "==> building cleaned manifest"
