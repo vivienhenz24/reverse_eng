@@ -72,6 +72,7 @@ fi
 
 echo "==> installing Python deps"
 python -m pip install --upgrade \
+  attrs \
   soundfile \
   huggingface_hub[cli] \
   hf_transfer \
