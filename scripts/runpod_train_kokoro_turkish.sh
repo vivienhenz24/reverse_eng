@@ -91,22 +91,34 @@ python -m pip install --upgrade \
 DOWNLOAD_DIR="$ROOT_DIR/.downloads/styletts2_turkish"
 mkdir -p "$DOWNLOAD_DIR" "$HF_HOME" "$RUN_DIR"
 
-echo "==> downloading dataset tarballs from Hugging Face"
-HF_ARGS=(download "$HF_DATASET_REPO" --repo-type dataset --local-dir "$DOWNLOAD_DIR")
-if [[ -n "${HF_TOKEN:-}" ]]; then
-  HF_ARGS+=(--token "$HF_TOKEN")
+if [[ -f "$DOWNLOAD_DIR/combined_dataset.tar.gz" && -f "$DOWNLOAD_DIR/alignments.tar.gz" ]]; then
+  echo "==> dataset tarballs already downloaded, skipping"
+else
+  echo "==> downloading dataset tarballs from Hugging Face"
+  HF_ARGS=(download "$HF_DATASET_REPO" --repo-type dataset --local-dir "$DOWNLOAD_DIR")
+  if [[ -n "${HF_TOKEN:-}" ]]; then
+    HF_ARGS+=(--token "$HF_TOKEN")
+  fi
+  hf "${HF_ARGS[@]}" combined_dataset.tar.gz alignments.tar.gz
 fi
-hf "${HF_ARGS[@]}" combined_dataset.tar.gz alignments.tar.gz
 
-echo "==> extracting dataset"
-tar -xzf "$DOWNLOAD_DIR/combined_dataset.tar.gz" -C "$ROOT_DIR"
-tar -xzf "$DOWNLOAD_DIR/alignments.tar.gz" -C "$ROOT_DIR"
+if [[ -d "$ROOT_DIR/combined_dataset" && -f "$ROOT_DIR/combined_dataset/manifest.csv" && -d "$ROOT_DIR/alignments" ]]; then
+  echo "==> extracted dataset already present, skipping"
+else
+  echo "==> extracting dataset"
+  tar -xzf "$DOWNLOAD_DIR/combined_dataset.tar.gz" -C "$ROOT_DIR"
+  tar -xzf "$DOWNLOAD_DIR/alignments.tar.gz" -C "$ROOT_DIR"
+fi
 
 echo "==> building cleaned manifest"
 python comparisons/build_turkish_training_manifest.py
 
-echo "==> canonicalizing alignments"
-python comparisons/canonicalize_turkish_alignments.py
+if [[ -d "$ROOT_DIR/alignments_kokoro_tr" && -n "$(find "$ROOT_DIR/alignments_kokoro_tr" -maxdepth 1 -name '*.pt' -print -quit)" ]]; then
+  echo "==> canonical alignments already present, skipping"
+else
+  echo "==> canonicalizing alignments"
+  python comparisons/canonicalize_turkish_alignments.py
+fi
 
 echo "==> building single-speaker subset manifest"
 python kokoro/training/build_turkish_subset_manifest.py \
