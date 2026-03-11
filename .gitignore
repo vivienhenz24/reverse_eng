@@ -40,6 +40,35 @@ htmlcov/
 *.log
 runs/
 tensorboard/
+.downloads/
+.hf_home/
+.hf_cache/
+.venv-runpod/
+
+# Turkish training outputs
+alignments_kokoro_tr/
+combined_dataset/
+kokoro/training/checkpoint_smoke/
+kokoro/training/long_run/
+kokoro/training/long_run_smoke/
+kokoro/training/mps_smoke_out/
+kokoro/training/mps_smoke_out2/
+kokoro/training/mps_smoke_out3/
+kokoro/training/overfit_listen/
+kokoro/training/phoneme_audit/
+kokoro/training/phoneme_audit_full/
+kokoro/training/phoneme_audit_smoke/
+kokoro/training/phoneme_audit_smoke2/
+kokoro/training/runpod_runs/
+kokoro/training/unfreeze_matrix/
+kokoro/training/unfreeze_matrix_full/
+kokoro/training/unfreeze_matrix_smoke/
+kokoro/training/variant_listen/
+kokoro/training/listening_suite_baseline/
+kokoro/training/listening_suite_debug/
+kokoro/training/listening_suite_overfit/
+kokoro/training/listening_suite_smoke/
+kokoro/training/*_smoke.csv
 
 # OS
 .DS_Store
