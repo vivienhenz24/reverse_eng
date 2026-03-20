@@ -468,7 +468,14 @@ def run_training(args: argparse.Namespace):
     if args.save_dir is not None and step > 0:
         args.save_dir.mkdir(parents=True, exist_ok=True)
         torch.save(trainer.model.state_dict(), args.save_dir / "final_model_state_dict.pt")
-        torch.save(trainer.voicepacks.table.detach().cpu(), args.save_dir / "final_voicepacks.pt")
+        table = trainer.voicepacks.table.detach().cpu()
+        torch.save(table, args.save_dir / "final_voicepacks.pt")
+        # Export individual voicepack files matching the released Kokoro format:
+        # speaker_index 0 = male_speaker, 1 = female_speaker
+        # Naming follows Kokoro convention: t=Turkish, m/f=gender
+        torch.save(table[0], args.save_dir / "tm_turkish.pt")  # male
+        torch.save(table[1], args.save_dir / "tf_turkish.pt")  # female
+        print(f"exported voicepacks: tm_turkish.pt  tf_turkish.pt")
 
 
 def main(argv: list[str] | None = None, defaults: dict[str, object] | None = None, description: str | None = None):
