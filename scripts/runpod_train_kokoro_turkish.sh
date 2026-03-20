@@ -223,18 +223,21 @@ else
   python comparisons/canonicalize_turkish_alignments.py
 fi
 
-echo "==> building single-speaker subset manifest"
+echo "==> building training manifest (speaker=${SPEAKER})"
+SPEAKER_ARGS=()
+if [[ "$SPEAKER" != "both" ]]; then
+  SPEAKER_ARGS+=(--speaker "$SPEAKER")
+fi
+
 if [[ "$MAX_ROWS" != "0" ]]; then
   python kokoro/training/build_turkish_subset_manifest.py \
-    --speaker "$SPEAKER" \
+    "${SPEAKER_ARGS[@]}" \
     --max-phonemes "$MAX_PHONEMES" \
     --max-rows "$MAX_ROWS" \
     --out "$RUN_DIR/${RUN_NAME}.csv"
-fi
-
-if [[ "$MAX_ROWS" == "0" ]]; then
+else
   python kokoro/training/build_turkish_subset_manifest.py \
-    --speaker "$SPEAKER" \
+    "${SPEAKER_ARGS[@]}" \
     --max-phonemes "$MAX_PHONEMES" \
     --out "$RUN_DIR/${RUN_NAME}.csv"
 fi
@@ -250,6 +253,11 @@ if [[ -d "$RUN_DIR/checkpoints" && -n "$(find "$RUN_DIR/checkpoints" -maxdepth 1
   RESUME_ARGS+=(--resume)
 fi
 
+SPEAKER_LABEL_ARGS=()
+if [[ "$SPEAKER" != "both" ]]; then
+  SPEAKER_LABEL_ARGS+=(--speaker-label "$SPEAKER")
+fi
+
 echo "==> stage 1 training"
 python "$TRAIN_SCRIPT" \
   --manifest "$RUN_DIR/${RUN_NAME}.csv" \
@@ -263,10 +271,10 @@ python "$TRAIN_SCRIPT" \
   --grad-clip "$GRAD_CLIP" \
   --lambda-f0 "$LAMBDA_F0" \
   --lambda-norm "$LAMBDA_NORM" \
-  --speaker-label "$SPEAKER" \
   --save-dir "$RUN_DIR/checkpoints" \
   --save-audio-every "$SAVE_AUDIO_EVERY" \
   --save-checkpoint-every "$SAVE_CHECKPOINT_EVERY" \
+  "${SPEAKER_LABEL_ARGS[@]}" \
   "${PIN_ARGS[@]}" \
   "${RESUME_ARGS[@]}" \
   2>&1 | tee "$RUN_DIR/train.log"
@@ -300,7 +308,7 @@ print(best)
       --lambda-norm "$LAMBDA_NORM" \
       --train-config "${STAGE2_TRAIN_CONFIG:-voicepack_predictor_text_bertenc}" \
       --resume-weights-only "$STAGE2_CKPT" \
-      --speaker-label "$SPEAKER" \
+      "${SPEAKER_LABEL_ARGS[@]}" \
       --save-dir "$STAGE2_DIR/checkpoints" \
       --save-audio-every "$SAVE_AUDIO_EVERY" \
       --save-checkpoint-every "$SAVE_CHECKPOINT_EVERY" \
