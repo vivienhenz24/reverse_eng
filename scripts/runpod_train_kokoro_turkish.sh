@@ -134,8 +134,8 @@ fi
 
 if command -v apt-get >/dev/null 2>&1; then
   echo "==> installing system packages"
-  sudo apt-get update
-  sudo apt-get install -y ffmpeg libsndfile1 git git-lfs
+  apt-get update
+  apt-get install -y ffmpeg libsndfile1 git git-lfs
   git lfs install || true
 fi
 
