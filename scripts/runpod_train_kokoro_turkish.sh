@@ -41,7 +41,8 @@ case "$APPROACH" in
     set_default BATCH_SIZE 2
     set_default LR 2e-5
     set_default GRAD_CLIP 0.5
-    set_default SAVE_EVERY 50
+    set_default SAVE_AUDIO_EVERY 200
+    set_default SAVE_CHECKPOINT_EVERY 500
     ;;
   direct_bert)
     set_default TRAIN_SCRIPT kokoro/training/train_turkish_approach_direct_bert.py
@@ -50,7 +51,8 @@ case "$APPROACH" in
     set_default BATCH_SIZE 2
     set_default LR 1e-5
     set_default GRAD_CLIP 0.5
-    set_default SAVE_EVERY 50
+    set_default SAVE_AUDIO_EVERY 200
+    set_default SAVE_CHECKPOINT_EVERY 500
     ;;
   unfreeze_decoder)
     set_default TRAIN_SCRIPT kokoro/training/train_turkish_approach_unfreeze_decoder.py
@@ -59,7 +61,8 @@ case "$APPROACH" in
     set_default BATCH_SIZE 1
     set_default LR 1e-5
     set_default GRAD_CLIP 0.3
-    set_default SAVE_EVERY 25
+    set_default SAVE_AUDIO_EVERY 100
+    set_default SAVE_CHECKPOINT_EVERY 250
     ;;
   gt_bootstrap)
     set_default TRAIN_SCRIPT kokoro/training/train_turkish_approach_gt_bootstrap.py
@@ -68,7 +71,14 @@ case "$APPROACH" in
     set_default BATCH_SIZE 2
     set_default LR 2e-5
     set_default GRAD_CLIP 0.5
-    set_default SAVE_EVERY 50
+    set_default SAVE_AUDIO_EVERY 200
+    set_default SAVE_CHECKPOINT_EVERY 500
+    set_default LAMBDA_F0 3.0
+    set_default LAMBDA_NORM 3.0
+    # Stage 2: unfreeze bert_encoder, fresh optimizer, shorter run
+    set_default STAGE2_STEPS 6000
+    set_default STAGE2_LR 1e-5
+    set_default STAGE2_TRAIN_CONFIG voicepack_predictor_text_bertenc
     ;;
   voicepack_bootstrap)
     set_default TRAIN_SCRIPT kokoro/training/train_turkish_approach_voicepack_bootstrap.py
@@ -77,7 +87,8 @@ case "$APPROACH" in
     set_default BATCH_SIZE 2
     set_default LR 2e-5
     set_default GRAD_CLIP 0.5
-    set_default SAVE_EVERY 50
+    set_default SAVE_AUDIO_EVERY 200
+    set_default SAVE_CHECKPOINT_EVERY 500
     ;;
   *)
     echo "Unknown APPROACH=$APPROACH" >&2
@@ -85,6 +96,8 @@ case "$APPROACH" in
     ;;
 esac
 
+set_default LAMBDA_F0 1.0
+set_default LAMBDA_NORM 1.0
 set_default RUN_NAME "${APPROACH}_${SPEAKER}_p${MAX_PHONEMES}_rows${MAX_ROWS}"
 set_default RUN_DIR "kokoro/training/runpod_runs/${RUN_NAME}"
 HF_DATASET_REPO="${HF_DATASET_REPO:-vsqrd/styletts2-turkish}"
@@ -107,6 +120,8 @@ echo "==> device:    $DEVICE"
 echo "==> max phon:  $MAX_PHONEMES"
 echo "==> max rows:  $MAX_ROWS"
 echo "==> max steps: $MAX_STEPS"
+echo "==> save aud:  $SAVE_AUDIO_EVERY"
+echo "==> save ckpt: $SAVE_CHECKPOINT_EVERY"
 
 if [[ -z "${HF_TOKEN:-}" ]]; then
   read -r -s -p "Enter Hugging Face token: " HF_TOKEN
@@ -235,6 +250,7 @@ if [[ -d "$RUN_DIR/checkpoints" && -n "$(find "$RUN_DIR/checkpoints" -maxdepth 1
   RESUME_ARGS+=(--resume)
 fi
 
+echo "==> stage 1 training"
 python "$TRAIN_SCRIPT" \
   --manifest "$RUN_DIR/${RUN_NAME}.csv" \
   --alignment-dir alignments_kokoro_tr \
@@ -245,9 +261,50 @@ python "$TRAIN_SCRIPT" \
   --num-workers "$NUM_WORKERS" \
   --lr "$LR" \
   --grad-clip "$GRAD_CLIP" \
+  --lambda-f0 "$LAMBDA_F0" \
+  --lambda-norm "$LAMBDA_NORM" \
   --speaker-label "$SPEAKER" \
   --save-dir "$RUN_DIR/checkpoints" \
-  --save-every "$SAVE_EVERY" \
+  --save-audio-every "$SAVE_AUDIO_EVERY" \
+  --save-checkpoint-every "$SAVE_CHECKPOINT_EVERY" \
   "${PIN_ARGS[@]}" \
   "${RESUME_ARGS[@]}" \
   2>&1 | tee "$RUN_DIR/train.log"
+
+if [[ -n "${STAGE2_STEPS:-}" && "${STAGE2_STEPS}" != "0" ]]; then
+  STAGE2_CKPT="$(python3 -c "
+import re, sys
+from pathlib import Path
+ckpts = sorted(Path('$RUN_DIR/checkpoints').glob('checkpoint_step_*.pt'))
+if not ckpts: sys.exit(1)
+best = max(ckpts, key=lambda p: int(re.search(r'checkpoint_step_(\d+)\.pt', p.name).group(1)))
+print(best)
+")"
+  if [[ -z "$STAGE2_CKPT" ]]; then
+    echo "==> no stage 1 checkpoint found, skipping stage 2" >&2
+  else
+    STAGE2_DIR="$RUN_DIR/stage2"
+    mkdir -p "$STAGE2_DIR"
+    echo "==> stage 2 training (config=${STAGE2_TRAIN_CONFIG:-voicepack_predictor_text_bertenc}, from $STAGE2_CKPT)"
+    python "$TRAIN_SCRIPT" \
+      --manifest "$RUN_DIR/${RUN_NAME}.csv" \
+      --alignment-dir alignments_kokoro_tr \
+      --device "$DEVICE" \
+      --batch-size "$BATCH_SIZE" \
+      --max-steps "${STAGE2_STEPS}" \
+      --max-samples "$MAX_ROWS" \
+      --num-workers "$NUM_WORKERS" \
+      --lr "${STAGE2_LR:-1e-5}" \
+      --grad-clip "$GRAD_CLIP" \
+      --lambda-f0 "$LAMBDA_F0" \
+      --lambda-norm "$LAMBDA_NORM" \
+      --train-config "${STAGE2_TRAIN_CONFIG:-voicepack_predictor_text_bertenc}" \
+      --resume-weights-only "$STAGE2_CKPT" \
+      --speaker-label "$SPEAKER" \
+      --save-dir "$STAGE2_DIR/checkpoints" \
+      --save-audio-every "$SAVE_AUDIO_EVERY" \
+      --save-checkpoint-every "$SAVE_CHECKPOINT_EVERY" \
+      "${PIN_ARGS[@]}" \
+      2>&1 | tee "$STAGE2_DIR/train.log"
+  fi
+fi

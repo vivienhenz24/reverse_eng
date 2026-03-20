@@ -197,18 +197,21 @@ def save_training_checkpoint(
         "args": vars(args),
     }
     torch.save(ckpt, save_dir / f"checkpoint_step_{step:04d}.pt")
-    torch.save(trainer.voicepacks.table.detach().cpu(), save_dir / f"voicepacks_step_{step:04d}.pt")
+    if args.save_voicepack_snapshots:
+        torch.save(trainer.voicepacks.table.detach().cpu(), save_dir / f"voicepacks_step_{step:04d}.pt")
 
 
 def load_training_checkpoint(
     checkpoint_path: Path,
     trainer: KokoroTurkishTrainer,
     optimizer: torch.optim.Optimizer,
+    weights_only: bool = False,
 ):
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     trainer.model.load_state_dict(ckpt["model_state_dict"], strict=False)
     trainer.voicepacks.table.data.copy_(ckpt["voicepack_table"].to(trainer.voicepacks.table.device))
-    optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+    if not weights_only:
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
     return int(ckpt["step"]) + 1
 
 
@@ -266,7 +269,12 @@ def build_arg_parser(defaults: dict[str, object] | None = None, description: str
     parser.add_argument("--device", type=str, default=defaults.get("device", "cpu"))
     parser.add_argument("--save-dir", type=Path, default=defaults.get("save_dir"))
     parser.add_argument("--save-every", type=int, default=defaults.get("save_every", 0))
+    parser.add_argument("--save-audio-every", type=int, default=defaults.get("save_audio_every", 0))
+    parser.add_argument("--save-checkpoint-every", type=int, default=defaults.get("save_checkpoint_every", 0))
+    parser.add_argument("--save-voicepack-snapshots", action="store_true", default=defaults.get("save_voicepack_snapshots", False))
     parser.add_argument("--resume", action="store_true", default=defaults.get("resume", False))
+    parser.add_argument("--resume-weights-only", type=Path, default=defaults.get("resume_weights_only"),
+                        metavar="CHECKPOINT", help="Load weights+voicepack from this checkpoint but start a fresh optimizer. Use when switching train-config between stages.")
     parser.add_argument("--num-workers", type=int, default=defaults.get("num_workers", 2))
     parser.add_argument("--pin-memory", action="store_true", default=defaults.get("pin_memory", False))
     parser.add_argument(
@@ -284,6 +292,11 @@ def build_arg_parser(defaults: dict[str, object] | None = None, description: str
     )
     parser.add_argument("--voicepack-init", type=str, default=defaults.get("voicepack_init", "mean"))
     parser.add_argument("--speaker-label", type=str, default=defaults.get("speaker_label", "female_speaker"))
+    parser.add_argument("--lambda-stft", type=float, default=defaults.get("lambda_stft", 1.0))
+    parser.add_argument("--lambda-dur", type=float, default=defaults.get("lambda_dur", 1.0))
+    parser.add_argument("--lambda-f0", type=float, default=defaults.get("lambda_f0", 1.0))
+    parser.add_argument("--lambda-norm", type=float, default=defaults.get("lambda_norm", 1.0))
+    parser.add_argument("--lambda-voicepack-smooth", type=float, default=defaults.get("lambda_voicepack_smooth", 1e-4))
     parser.add_argument(
         "--decoder-f0-source",
         type=str,
@@ -314,7 +327,15 @@ def run_training(args: argparse.Namespace):
     trainer.set_trainable_configuration(args.train_config)
     trainer.train()
 
-    losses = TurkishKokoroLosses(device=device, disable_f0_loss=args.disable_f0_loss)
+    losses = TurkishKokoroLosses(
+        device=device,
+        disable_f0_loss=args.disable_f0_loss,
+        lambda_stft=args.lambda_stft,
+        lambda_dur=args.lambda_dur,
+        lambda_f0=args.lambda_f0,
+        lambda_norm=args.lambda_norm,
+        lambda_voicepack_smooth=args.lambda_voicepack_smooth,
+    )
     if (args.decoder_f0_source == "gt" or args.decoder_n_source == "gt") and losses.pitch_extractor is None:
         raise ValueError("GT decoder conditioning requires F0 loss to remain enabled")
 
@@ -336,14 +357,27 @@ def run_training(args: argparse.Namespace):
     print(f"pin memory:           {args.pin_memory}")
     print(f"disable F0 loss:      {args.disable_f0_loss}")
     print(f"save dir:             {args.save_dir}")
+    print(f"save audio every:     {args.save_audio_every}")
+    print(f"save ckpt every:      {args.save_checkpoint_every}")
+    print(f"save vp snapshots:    {args.save_voicepack_snapshots}")
     print(f"train config:         {args.train_config}")
     print(f"voicepack init:       {args.voicepack_init}")
     print(f"speaker label:        {args.speaker_label}")
     print(f"decoder F0 source:    {args.decoder_f0_source}")
     print(f"decoder N source:     {args.decoder_n_source}")
+    print(f"lambda stft:          {args.lambda_stft}")
+    print(f"lambda dur:           {args.lambda_dur}")
+    print(f"lambda f0:            {args.lambda_f0}")
+    print(f"lambda norm:          {args.lambda_norm}")
+    print(f"lambda vp smooth:     {args.lambda_voicepack_smooth}")
 
     step = 0
-    if args.resume and args.save_dir is not None:
+    if args.resume_weights_only is not None:
+        step = load_training_checkpoint(args.resume_weights_only, trainer, optimizer, weights_only=True)
+        step = 0  # fresh optimizer means we restart the step counter for this stage
+        print(f"weights loaded from:  {args.resume_weights_only}")
+        print(f"optimizer:            fresh (weights-only resume)")
+    elif args.resume and args.save_dir is not None:
         latest = find_latest_checkpoint(args.save_dir)
         if latest is not None:
             step = load_training_checkpoint(latest, trainer, optimizer)
@@ -399,13 +433,26 @@ def run_training(args: argparse.Namespace):
         optimizer.step()
 
         if args.save_dir is not None:
-            should_save = step == 0 or step == args.max_steps - 1 or (args.save_every > 0 and step % args.save_every == 0)
-            if should_save:
+            should_save_audio = (
+                step == 0
+                or step == args.max_steps - 1
+                or (args.save_audio_every > 0 and step % args.save_audio_every == 0)
+                or (args.save_every > 0 and step % args.save_every == 0 and args.save_audio_every == 0)
+            )
+            should_save_checkpoint = (
+                step == 0
+                or step == args.max_steps - 1
+                or (args.save_checkpoint_every > 0 and step % args.save_checkpoint_every == 0)
+                or (args.save_every > 0 and step % args.save_every == 0 and args.save_checkpoint_every == 0)
+            )
+            if should_save_audio or should_save_checkpoint:
                 args.save_dir.mkdir(parents=True, exist_ok=True)
-                base = args.save_dir / f"step_{step:04d}"
-                save_waveform(base.with_name(base.name + "_pred.wav"), out["audio"][0])
-                save_waveform(base.with_name(base.name + "_target.wav"), batch.waveforms[0])
-                save_training_checkpoint(args.save_dir, step, trainer, optimizer, args)
+                if should_save_audio:
+                    base = args.save_dir / f"step_{step:04d}"
+                    save_waveform(base.with_name(base.name + "_pred.wav"), out["audio"][0])
+                    save_waveform(base.with_name(base.name + "_target.wav"), batch.waveforms[0])
+                if should_save_checkpoint:
+                    save_training_checkpoint(args.save_dir, step, trainer, optimizer, args)
 
         print(
             f"step={step} "

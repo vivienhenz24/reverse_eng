@@ -12,7 +12,8 @@ if __name__ == "__main__":
             "grad_clip": 0.3,
             "batch_size": 1,
             "max_steps": 8000,
-            "save_every": 25,
+            "save_audio_every": 100,
+            "save_checkpoint_every": 250,
         },
         description="Approach 3: direct Turkish adaptation with decoder unfrozen",
     )

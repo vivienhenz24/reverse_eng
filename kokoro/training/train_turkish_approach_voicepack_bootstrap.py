@@ -12,7 +12,8 @@ if __name__ == "__main__":
             "grad_clip": 0.5,
             "batch_size": 2,
             "max_steps": 12000,
-            "save_every": 50,
+            "save_audio_every": 200,
+            "save_checkpoint_every": 500,
         },
         description="Approach 5: direct Turkish adaptation bootstrapped from same-gender released voicepacks",
     )
