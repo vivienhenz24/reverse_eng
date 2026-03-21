@@ -100,6 +100,17 @@ case "$APPROACH" in
     set_default SAVE_AUDIO_EVERY 200
     set_default SAVE_CHECKPOINT_EVERY 500
     ;;
+  combined)
+    # gt_bootstrap weights → unfreeze config: intelligibility + voice quality
+    set_default TRAIN_SCRIPT kokoro/training/train_turkish_approach_unfreeze.py
+    set_default MAX_PHONEMES 140
+    set_default MAX_STEPS 12000
+    set_default BATCH_SIZE 2
+    set_default LR 1e-5
+    set_default GRAD_CLIP 0.5
+    set_default SAVE_AUDIO_EVERY 200
+    set_default SAVE_CHECKPOINT_EVERY 500
+    ;;
   *)
     echo "Unknown APPROACH=$APPROACH" >&2
     exit 1
@@ -259,7 +270,9 @@ if [[ "$PIN_MEMORY" == "1" ]]; then
 fi
 
 RESUME_ARGS=()
-if [[ -d "$RUN_DIR/checkpoints" && -n "$(find "$RUN_DIR/checkpoints" -maxdepth 1 -name 'checkpoint_step_*.pt' -print -quit 2>/dev/null)" ]]; then
+if [[ -n "${INIT_CHECKPOINT:-}" ]]; then
+  RESUME_ARGS+=(--resume-weights-only "$INIT_CHECKPOINT")
+elif [[ -d "$RUN_DIR/checkpoints" && -n "$(find "$RUN_DIR/checkpoints" -maxdepth 1 -name 'checkpoint_step_*.pt' -print -quit 2>/dev/null)" ]]; then
   RESUME_ARGS+=(--resume)
 fi
 
