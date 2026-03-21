@@ -90,6 +90,16 @@ case "$APPROACH" in
     set_default SAVE_AUDIO_EVERY 200
     set_default SAVE_CHECKPOINT_EVERY 500
     ;;
+  unfreeze)
+    set_default TRAIN_SCRIPT kokoro/training/train_turkish_approach_unfreeze.py
+    set_default MAX_PHONEMES 140
+    set_default MAX_STEPS 12000
+    set_default BATCH_SIZE 1
+    set_default LR 1e-5
+    set_default GRAD_CLIP 0.5
+    set_default SAVE_AUDIO_EVERY 200
+    set_default SAVE_CHECKPOINT_EVERY 500
+    ;;
   *)
     echo "Unknown APPROACH=$APPROACH" >&2
     exit 1
